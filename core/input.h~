@@ -1,0 +1,19 @@
+#ifndef __INPUT_H
+#define __INPUT_H
+
+#include "psix.h"
+
+extern u32 lastpad;
+extern SceCtrlData paddata;
+extern SceUID psix_thread_input;
+
+void psix_input_init();
+void psix_input_update();
+void psix_input_update_cursor();
+void psix_input_start_thread();
+
+extern float psix_cursor_x;
+extern float psix_cursor_y;
+extern int psix_bottab_state;
+
+#endif

@@ -1,0 +1,83 @@
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <pspfilemgr.h>
+#include <pspnet.h>
+#include <pspnet_inet.h>
+#include <pspnet_apctl.h>
+#include <pspnet_resolver.h>
+
+typedef struct videoFile
+{
+	int fd;
+	int currentFrame;
+	
+} videoFile;
+
+videoFile* videoPlaylist;
+int videoPlaylistCount;
+int isPlaying;
+
+void main()
+{
+	//Figure out where our home dir is, for now it's hardcoded
+	char* curDir = "ms0:/PSP/VIDEO/"
+
+	//Enumerate all video files and add them to the playlist
+	int curDirD = sceIoDopen(curDir);
+	if (curDirD >= 0) {
+		while (1) {
+			SceIoDirent fileInfo;
+			int ret = sceIoDread(curDirD, &fileInfo);
+			if (ret > 0) {
+				//There is a file
+				if (strstr(fileInfo.d_name, ".avi") != NULL) {
+					//It is an AVI, add it to the playlist
+					//videoFile newVideoFile = malloc(sizeof(videoFile));
+					//videoPlaylist[videoPlaylistCount] = ;
+					//videoPlaylistCount++;
+				}
+			} else if (ret == 0) {
+				//No more files
+				break;
+			} else {
+				//Error
+			}
+		}
+		sceIoDclose(curDirD);
+	} else {
+		//Error
+	}
+}
+
+void videoPlay(videoFile video, int fullScreen)
+{
+	if (isPlaying == 0) {
+		//Open the file for reading
+		sceIoOpen(video.fd, PSP_PERM_RDRW,0777);
+
+		//Decode the video
+		while(isPlaying != -1) {
+			//Decode frames
+			//Do something with them
+			if (framesLeft <= 0) {
+				isPlaying = -1;
+			}
+		}
+
+		//Close the file
+		sceIoClose(video.fd);
+	}
+}
+
+void videoPause()
+{
+	//Pause/unpause decoding
+	isPlaying = !isPlaying;
+}
+
+void videoStop()
+{
+	//Stop decoding
+	isPlaying = -1;
+}

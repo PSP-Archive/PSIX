@@ -1,0 +1,415 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pspkernel.h>
+#include <pspdisplay.h>
+#include <pspiofilemgr.h>
+#include <limits.h>
+#include <errno.h>
+#include <math.h>
+#include <malloc.h>
+#include "mp3.h"
+
+
+#define FALSE 0
+#define TRUE !FALSE
+#define min(a,b) (((a)<(b))?(a):(b))
+#define max(a,b) (((a)>(b))?(a):(b))
+#define MadErrorString(x) mad_stream_errorstr(x)
+#define OUTPUT_BUFFER_SIZE	4096*2	/* Must be an integer multiple of 4. */
+#define INPUT_BUFFER_SIZE	8192/2
+
+mad_fixed_t Filter[32];
+int DoFilter = 0;
+
+#define NUMCHANNELS 2
+//long size;
+long samplesInOutput = 0;
+
+struct mad_stream Stream;
+struct mad_frame Frame;
+struct mad_synth Synth;
+mad_timer_t Timer;
+
+signed short OutputBuffer[OUTPUT_BUFFER_SIZE];
+unsigned char InputBuffer[INPUT_BUFFER_SIZE + MAD_BUFFER_GUARD],
+*OutputPtr = (unsigned char *) OutputBuffer, *GuardPtr = NULL;
+const unsigned char *OutputBufferEnd = (unsigned char *) OutputBuffer + OUTPUT_BUFFER_SIZE * 2;
+int Status = 0, i;
+unsigned long FrameCount = 0;
+
+/* data we're saving for the fft */
+signed short SampBuf[2048*2];
+int samps=0;
+
+static unsigned int filePos = 0;
+static SceUID current_file = 0;
+static unsigned int fileSize = 1;
+static unsigned int samplesRead;
+
+static int isPlaying;
+static int myChannel;
+static int eos;
+
+typedef struct Sample
+{
+	short left;
+	short right;
+} Sample;
+
+static inline short convertSample(mad_fixed_t sample)
+{
+	/* round */
+	sample += (1L << (MAD_F_FRACBITS - 16));
+
+	/* clip */
+	if (sample >= MAD_F_ONE)
+		sample = MAD_F_ONE - 1;
+	else if (sample < -MAD_F_ONE)
+		sample = -MAD_F_ONE;
+
+	/* quantize */
+	return sample >> (MAD_F_FRACBITS + 1 - 16);
+}
+
+static void convertLeftSamples(Sample* first, Sample* last, const mad_fixed_t* src)
+{
+	Sample* dst;
+	for (dst = first; dst != last; ++dst)
+	{
+		dst->left = convertSample(*src++);
+	}
+}
+
+static void convertRightSamples(Sample* first, Sample* last, const mad_fixed_t* src)
+{
+	Sample* dst;
+	for (dst = first; dst != last; ++dst)
+	{
+		dst->right = convertSample(*src++);
+	}
+}
+
+static void MP3_Read()
+{
+	const unsigned int bytesToKeep = Stream.bufend - Stream.next_frame;
+	unsigned int bytesToFill = sizeof(InputBuffer) - bytesToKeep;
+
+	if (bytesToKeep)
+	{
+		memmove(InputBuffer, InputBuffer + sizeof(InputBuffer) - bytesToKeep, bytesToKeep);
+	}
+
+	unsigned char* bufferPos = InputBuffer + bytesToKeep;
+	while (bytesToFill > 0)
+	{
+		const unsigned int bytesRead = sceIoRead(current_file, bufferPos, bytesToFill);
+
+		if (bytesRead == 0)
+		{
+			//sceIoLseek(current_file, 0, PSP_SEEK_SET);
+			//filePos = 0;
+			//continue;
+			eos = 1;
+			isPlaying = 0;
+			//MP3_End();
+			return;
+		}
+
+		bytesToFill -= bytesRead;
+		bufferPos += bytesRead;
+		filePos += bytesRead;
+	}
+}
+
+static void MP3_Decode()
+{
+	while ((mad_frame_decode(&Frame, &Stream) == -1) && ((Stream.error == MAD_ERROR_BUFLEN) || (Stream.error == MAD_ERROR_BUFPTR)))
+	{
+		MP3_Read();
+		mad_stream_buffer(&Stream, InputBuffer, sizeof(InputBuffer));
+		if (eos == 1) {
+			MP3_Stop();
+			return;
+		}
+	}
+	mad_timer_add(&Timer, Frame.header.duration);
+	mad_synth_frame(&Synth, &Frame);
+}
+
+int fix_fft(signed short fr[], signed short fi[], int m, int inverse);
+void fix_loud(signed short loud[], signed short fr[], signed short fi[], int n, int scale_shift);
+
+      /* define number of samples */
+#define s0 2
+#define s1 4
+#define s2 8
+#define s3 16
+#define s4 32
+#define s5 64
+#define s6 64
+#define s7 64
+#define s8 95
+#define s9 95
+#define s10 108
+#define s11 108
+#define s12 108
+#define s13 128
+#define s14 128
+
+
+/* si = int array for output data */
+/* m = number of points in array */
+/* max = the maxumum value for the spectrum */
+int pMP3_Spectrum(int *si, int m, int max)
+{
+
+  signed short *fr,*fi;
+  int i,j;
+
+  if (samps > 0)
+    {
+      fr = malloc(samps*2);		/* 2 bytes per sample */
+      fi = malloc(samps*2);
+      memset(fi,0,samps*2);
+
+      /* get an average of both channels */
+      for (i=0; i < samps; i++)
+	  (*(fr+i)) = SampBuf[i*2]/2+SampBuf[i*2+1]/2; 
+      
+      /* do a fft */
+      fix_fft(fr,fi,samps*2,0);
+
+      /* clear the output vector */
+      memset(si,0,m*4);
+
+      /* compute loudness */
+      signed short *l;
+      l = malloc(2*samps);
+      memset(l,0,2*samps);
+      fix_loud(l,fr,fi,samps,4);
+
+      /* clear negative values */
+      signed short *lp = l;
+      for (j=0; j < samps; j++,lp++)
+	if (*lp < 0) *lp = 0;
+
+      int *sii=si;
+      signed short *fri=l;
+      for (j=0; j < s0; j++,fri++)
+	*sii += *fri;
+      *sii /= s0;
+      for (j=0,sii++; j < s1; j++,fri++)
+	*sii += *fri;
+      *sii /= s1;
+      for (j=0,sii++; j < s2; j++,fri++)
+	*sii += *fri;
+      *sii /= s2;
+      for (j=0,sii++; j < s3; j++,fri++)
+	*sii += *fri;
+      *sii /= s3;
+      for (j=0,sii++; j < s4; j++,fri++)
+	*sii += *fri;
+      *sii /= s4;
+      for (j=0,sii++; j < s5; j++,fri++)
+	*sii += *fri;
+      *sii /= s5;
+      for (j=0,sii++; j < s6; j++,fri++)
+	*sii += *fri;
+      *sii /= s6;
+      for (j=0,sii++; j < s7; j++,fri++)
+	*sii += *fri;
+      *sii /= s7;
+      for (j=0,sii++; j < s8; j++,fri++)
+	*sii += *fri;
+      *sii /= s8;
+      for (j=0,sii++; j < s9; j++,fri++)
+	*sii += *fri;
+      *sii /= s9;
+      for (j=0,sii++; j < s10; j++,fri++)
+	*sii += *fri;
+      *sii /= s10;
+      for (j=0,sii++; j < s11; j++,fri++)
+	*sii += *fri;
+      *sii /= s11;
+      for (j=0,sii++; j < s12; j++,fri++)
+	*sii += *fri;
+      *sii /= s12;
+      for (j=0,sii++; j < s13; j++,fri++)
+	*sii += *fri;
+      *sii /= s13;
+      for (j=0,sii++; j < s14; j++,fri++)
+	*sii += *fri;
+      *sii /= s14;
+
+
+      free(fr);
+      free(fi);
+      free(l);
+    }
+
+  return 0;
+}
+
+static void MP3_Callback(void* buffer, unsigned int samplesToWrite, void* userData)
+{
+  samps = samplesToWrite;
+
+  if (isPlaying) {
+    // Where are we writing to?
+    Sample* destination = (Sample*) buffer;
+    
+    // While we've got samples to write...
+    while (samplesToWrite > 0)
+      {
+	// Enough samples available?
+	const unsigned int samplesAvailable = Synth.pcm.length - samplesRead;
+	if (samplesAvailable > samplesToWrite)
+	  {
+	    // Write samplesToWrite samples.
+	    convertLeftSamples(destination, destination + samplesToWrite, &Synth.pcm.samples[0][samplesRead]);
+	    convertRightSamples(destination, destination + samplesToWrite, &Synth.pcm.samples[1][samplesRead]);
+	    
+	    // We're still using the same PCM data.
+	    samplesRead += samplesToWrite;
+	    
+	    // Done.
+	    samplesToWrite = 0;
+	  }
+	else
+	  {
+	    // Write samplesAvailable samples.
+	    convertLeftSamples(destination, destination + samplesAvailable, &Synth.pcm.samples[0][samplesRead]);
+	    convertRightSamples(destination, destination + samplesAvailable, &Synth.pcm.samples[1][samplesRead]);
+	    
+	    // We need more PCM data.
+	    samplesRead = 0;
+	    MP3_Decode();
+	    
+	    // We've still got more to write.
+	    destination += samplesAvailable;
+	    samplesToWrite -= samplesAvailable;
+	  }
+      }
+  }
+  else
+    memset (buffer, 0 , samplesToWrite*2*2);
+  
+  /* copy the output bufer  */
+  memcpy(SampBuf,buffer,samps*2*2);
+}
+
+void pMP3_Init(int channel)
+{
+	myChannel = channel;
+	isPlaying = FALSE;
+	pspAudioSetChannelCallback(myChannel, MP3_Callback, 0);
+
+	/* initialize some merde */
+	samplesInOutput = 0;
+	Status = 0;
+	FrameCount = 0;
+	samplesRead = 0;
+	eos = 0;
+
+	filePos = 0;
+	current_file = 0;
+	fileSize = 1;
+
+	mad_stream_init(&Stream);
+	mad_frame_init(&Frame);
+	mad_synth_init(&Synth);
+	mad_timer_reset(&Timer);
+	
+	//scePowerSetClockFrequency(333, 166, 166);
+}
+
+void MP3_FreeTune()
+{
+  //if (InputBuffer)
+  //free(InputBuffer);
+
+	mad_synth_finish(&Synth);
+	mad_frame_finish(&Frame);
+	mad_stream_finish(&Stream);
+
+	return;
+
+	//  if (!Status) {
+	// char Buffer[80];
+
+	//    mad_timer_string(Timer, Buffer, "%lu:%02lu.%03u", MAD_UNITS_MINUTES, MAD_UNITS_MILLISECONDS, 0);
+	//printf("%lu frames decoded (%s).\n", FrameCount, Buffer);
+	//sceDisplayWaitVblankStart();
+	//sceKernelDelayThread(500000);
+	//}
+}
+
+void pMP3_End()
+{
+  //	sceKernelDelayThread(50000);
+	pspAudioSetChannelCallback(myChannel, 0,0);
+	MP3_Stop();
+	sceKernelDelayThread(50000);
+	MP3_FreeTune();
+	memset(SampBuf,0,1024*4);
+}
+
+int pMP3_Load(char *filename)
+{
+	if ((current_file = sceIoOpen(filename, PSP_O_RDONLY, 0777)) > 0) {
+		fileSize = sceIoLseek(current_file, 0, PSP_SEEK_END);
+		sceIoLseek(current_file, 0, PSP_SEEK_SET);
+		return 1;
+	}
+	return 0;
+}
+
+int pMP3_Play()
+{
+	if (isPlaying)
+		return FALSE;
+
+	isPlaying = TRUE;
+
+	return TRUE;
+}
+
+void pMP3_Pause()
+{
+	isPlaying = !isPlaying;
+}
+
+int MP3_Stop()
+{
+	if (isPlaying == FALSE)
+		return FALSE;
+
+	isPlaying = FALSE;
+
+	sceIoClose(current_file);
+	current_file = 0;
+	memset(OutputBuffer, 0, OUTPUT_BUFFER_SIZE);
+	OutputPtr = (unsigned char *) OutputBuffer;
+
+	memset(InputBuffer, 0 , INPUT_BUFFER_SIZE + MAD_BUFFER_GUARD);
+
+	return TRUE;
+}
+
+void pMP3_GetTimeString(char *dest)
+{
+	mad_timer_string(Timer, dest, "%02u:%02u", MAD_UNITS_MINUTES, MAD_UNITS_SECONDS, 0);
+}
+
+signed long MP3_GetSongLength()
+{
+	return Frame.header.duration.seconds;
+}
+
+int pMP3_EndOfStream()
+{
+	if (eos == 1)
+		return 1;
+	return 0;
+}

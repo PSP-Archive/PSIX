@@ -1,0 +1,104 @@
+#include "psix.h"
+
+int LoadStartModule(char *path);
+
+int psix_usb_state;
+
+int psix_usb_init()
+{
+	LoadStartModule("flash0:/kd/semawm.prx");
+	LoadStartModule("flash0:/kd/usbstor.prx");
+	LoadStartModule("flash0:/kd/usbstormgr.prx");
+	LoadStartModule("flash0:/kd/usbstorms.prx");
+	LoadStartModule("flash0:/kd/usbstorboot.prx");
+
+	sceUsbStart(PSP_USBBUS_DRIVERNAME, 0, 0);
+	sceUsbStart(PSP_USBSTOR_DRIVERNAME, 0, 0);
+	sceUsbstorBootSetCapacity(0x800000);
+
+	//sceUsbActivate(0x1c8);
+	psix_usb_state = 0;
+	//psix_usb_toggle();
+
+	return 0;
+}
+
+int psix_usb_enabled()
+{
+  return psix_ubs_state;
+}
+
+void psix_usb_enable()
+{
+  if (!psix_usb_state)
+    sceUsbActivate(0x1c8);
+}
+
+void psix_usb_disable()
+{
+  if (psix_usb_state)
+    sceUsbDeactivate(0x1c8);
+}
+
+void psix_usb_toggle()
+{
+	psix_usb_state = !psix_usb_state;
+	sdi_set_enabled("usb_on",psix_usb_state==1);
+	sdi_set_enabled("usb_off",psix_usb_state==0);
+
+	if (psix_usb_state)
+		sceUsbActivate(0x1c8);
+	else
+		sceUsbDeactivate(0x1c8);
+}
+
+void psix_usb_start()
+{
+	if (!(sceUsbGetState() & PSP_USB_ACTIVATED))
+		sceUsbActivate(0x1c8);
+}
+
+int psix_usb_stop()
+{
+	if (sceUsbGetState() & PSP_USB_ACTIVATED)
+		sceUsbDeactivate(0x1c8);
+	return 0;
+}
+
+void psix_usb_shutdown()
+{
+	int retVal;
+	if (sceUsbGetState() & PSP_USB_ACTIVATED) {
+		retVal = sceUsbDeactivate(0x1c8);
+		if (retVal != 0)
+			printf("Error calling sceUsbDeactivate (0x%08X)\n", retVal);
+	}
+	retVal = sceUsbStop(PSP_USBSTOR_DRIVERNAME, 0, 0);
+	if (retVal != 0)
+		printf("Error stopping USB Mass Storage driver (0x%08X)\n",
+		retVal);
+
+	retVal = sceUsbStop(PSP_USBBUS_DRIVERNAME, 0, 0);
+	if (retVal != 0)
+		printf("Error stopping USB BUS driver (0x%08X)\n", retVal);
+}
+
+int LoadStartModule(char *path)
+{
+	u32 loadResult;
+	u32 startResult;
+	int status;
+
+	loadResult = sceKernelLoadModule(path, 0, NULL);
+	if (loadResult & 0x80000000)
+		return -1;
+	else
+		startResult =
+		sceKernelStartModule(loadResult, 0, NULL, &status, NULL);
+
+	if (loadResult != startResult)
+		return -2;
+
+	return 0;
+}
+

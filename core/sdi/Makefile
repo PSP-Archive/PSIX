@@ -1,0 +1,10 @@
+sdl:
+	gcc -o test -DSDL test.c sdi.c backends/sdl/sdi_sdl.c `/usr/bin/sdl-config --cflags` `/usr/bin/sdl-config --libs` -lpng
+designer:
+	gcc -o designer -DPC -DSDL designer.c sdi.c backends/sdl/sdi_sdl.c `sdl-config --cflags` `sdl-config --libs` -I/sw/include -L/sw/lib -lpng -lSDL_image -ljpeg
+
+
+mac:
+	gcc -o mac -DPC -DSDL mac.c sdi.c backends/sdl/sdi_sdl.c `sdl-config --cflags` `sdl-config --libs` -lpng -lSDL_image
+png:
+	gcc -o pngtest readpng.c -lpng 
